@@ -1,0 +1,3 @@
+# Ignore props files but keep directory
+!*
+.gitignore

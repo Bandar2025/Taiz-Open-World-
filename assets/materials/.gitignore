@@ -1,0 +1,3 @@
+# Ignore material files but keep directory
+!*
+.gitignore

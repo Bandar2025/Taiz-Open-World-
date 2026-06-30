@@ -1,0 +1,6 @@
+{
+  "name": "Lumen AI Cinematic Engine",
+  "description": "Lumen AI Cinematic Engine: TAIZ OPEN WORLD v0.9 - Professional AI-powered simulator with high-fidelity cinematic rendering, dynamic atmospheric synthesis, and realistic Yemeni cultural environments.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

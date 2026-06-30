@@ -1,0 +1,3 @@
+# Ignore textures files but keep directory
+!*
+.gitignore

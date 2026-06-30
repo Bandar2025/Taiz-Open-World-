@@ -1,0 +1,3 @@
+# Ignore vehicle files but keep directory
+!*
+.gitignore
