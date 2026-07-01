@@ -37,6 +37,7 @@ export const AudioSynthesizer: React.FC<AudioSynthesizerProps> = ({
   const adhanGainRef = useRef<GainNode | null>(null);
   const adhanOscsRef = useRef<OscillatorNode[]>([]);
   const masterGainRef = useRef<GainNode | null>(null);
+  const chirpTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   // Initialize Web Audio API
   const initAudio = () => {
@@ -149,17 +150,20 @@ export const AudioSynthesizer: React.FC<AudioSynthesizerProps> = ({
       birdEnv.connect(birdsGain);
       birdOsc.start(0);
 
-      // Random chirping interval
-      const chirp = () => {
-        if (!audioCtxRef.current || isMuted) return;
-        const now = ctx.currentTime;
-        birdOsc.frequency.setValueAtTime(2000 + Math.random() * 2000, now);
-        birdEnv.gain.setValueAtTime(0, now);
-        birdEnv.gain.linearRampToValueAtTime(0.1, now + 0.05);
-        birdEnv.gain.linearRampToValueAtTime(0, now + 0.15);
-        setTimeout(chirp, 500 + Math.random() * 3000);
-      };
-      chirp();
+  // Random chirping interval
+  const chirp = () => {
+    if (!audioCtxRef.current || isMuted || audioCtxRef.current.state === 'closed') return;
+    const ctx = audioCtxRef.current;
+    const now = ctx.currentTime;
+    birdOsc.frequency.setValueAtTime(2000 + Math.random() * 2000, now);
+    birdEnv.gain.setValueAtTime(0, now);
+    birdEnv.gain.linearRampToValueAtTime(0.1, now + 0.05);
+    birdEnv.gain.linearRampToValueAtTime(0, now + 0.15);
+    
+    // Safety check for recursive timeout
+    chirpTimeoutRef.current = setTimeout(chirp, 500 + Math.random() * 3000);
+  };
+  chirp();
 
       // 6. Synthesize Children Playing (Distant intermittent high-mid frequency filtered noise bursts)
       const childrenGain = ctx.createGain();
@@ -319,6 +323,9 @@ export const AudioSynthesizer: React.FC<AudioSynthesizerProps> = ({
     return () => {
       if (audioCtxRef.current) {
         audioCtxRef.current.close();
+      }
+      if (chirpTimeoutRef.current) {
+        clearTimeout(chirpTimeoutRef.current);
       }
     };
   }, []);

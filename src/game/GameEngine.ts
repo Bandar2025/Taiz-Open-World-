@@ -22,11 +22,14 @@ import {
 } from '../types';
 import { STORY_DATA } from '../data/storyData';
 
+export class Timer extends THREE.Clock {}
+
 export interface GameEngineCallbacks {
   onPlayerCoords: (x: number, z: number, rotation: number, isDriving: boolean, speed: number) => void;
   onPlaceVisited: (placeKey: string) => void;
   onDialoguePrompt: (p: string | null) => void;
   onDialogueActive: (d: string[] | null, s: string) => void;
+  onFPS?: (fps: number) => void;
 }
 
 export enum PlayerState {
@@ -48,7 +51,7 @@ export class GameEngine {
   private scene!: THREE.Scene;
   private camera!: THREE.PerspectiveCamera;
   private renderer!: THREE.WebGLRenderer;
-  private clock!: THREE.Clock;
+  private timer!: Timer;
   private animationFrameId?: number;
 
   // Lights
@@ -59,9 +62,9 @@ export class GameEngine {
   private activeLightsPool: THREE.PointLight[] = [];
 
   // Entities
-  private playerGroup!: THREE.Group;
-  private vehicleGroup!: THREE.Group;
-  private npcs: {
+  public playerGroup!: THREE.Group;
+  public vehicleGroup!: THREE.Group;
+  public npcs: {
     id: string;
     name: string;
     nameAr: string;
@@ -278,8 +281,27 @@ export class GameEngine {
 
   private handleMouseMove: (e: MouseEvent) => void = () => {};
   private handleMouseUp: () => void = () => {};
+  private handleMouseDown: (e: MouseEvent) => void = () => {};
+  private handleWheel: (e: WheelEvent) => void = () => {};
+  private handleTouchStart: (e: TouchEvent) => void = () => {};
   private handleTouchMove: (e: TouchEvent) => void = () => {};
   private handleTouchEnd: () => void = () => {};
+
+  public getScene(): THREE.Scene {
+    return this.scene;
+  }
+
+  public getPlayerPos(): THREE.Vector3 {
+    return this.playerPos.clone();
+  }
+
+  public getPlayerRotation(): number {
+    return this.playerRotation;
+  }
+
+  public getSpawnedVehicles() {
+    return this.spawnedVehicles;
+  }
 
   constructor(canvas: HTMLCanvasElement, callbacks: GameEngineCallbacks, options?: { thobeColor?: number; turbanColor?: number; onLoadingProgress?: (progress: number, label: string) => void }) {
     this.canvas = canvas;
@@ -355,7 +377,7 @@ export class GameEngine {
   }
 
   private initScene() {
-    this.clock = new THREE.Clock();
+    this.timer = new Timer();
     this.scene = new THREE.Scene();
     this.scene.fog = new THREE.FogExp2(0x0a0a0c, 0.015);
 
@@ -1077,6 +1099,26 @@ export class GameEngine {
       this.mouseState.isDragging = false;
     };
 
+    this.handleMouseDown = (e: MouseEvent) => {
+      this.mouseState.isDragging = true;
+      this.mouseState.prevX = e.clientX;
+      this.mouseState.prevY = e.clientY;
+    };
+
+    this.handleWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const zoomAmount = e.deltaY * 0.015;
+      this.zoomCamera(zoomAmount);
+    };
+
+    this.handleTouchStart = (e: TouchEvent) => {
+      if (e.touches.length === 1) {
+        this.mouseState.isDragging = true;
+        this.mouseState.prevX = e.touches[0].clientX;
+        this.mouseState.prevY = e.touches[0].clientY;
+      }
+    };
+
     this.handleTouchMove = (e: TouchEvent) => {
       if (!this.mouseState.isDragging || e.touches.length === 0) return;
       const deltaX = e.touches[0].clientX - this.mouseState.prevX;
@@ -1098,30 +1140,9 @@ export class GameEngine {
     window.addEventListener('mousemove', this.handleMouseMove);
     window.addEventListener('mouseup', this.handleMouseUp);
     
-    // Mouse control for camera orbit drag
-    this.canvas.addEventListener('mousedown', (e) => {
-      this.mouseState.isDragging = true;
-      this.mouseState.prevX = e.clientX;
-      this.mouseState.prevY = e.clientY;
-    });
-
-    // Mouse scroll wheel support for zooming in and out
-    this.canvas.addEventListener('wheel', (e) => {
-      e.preventDefault();
-      // Calculate a comfortable, relative zoom rate
-      const zoomAmount = e.deltaY * 0.015;
-      this.zoomCamera(zoomAmount);
-    }, { passive: false });
-
-    // Touch support for mobile devices
-    this.canvas.addEventListener('touchstart', (e) => {
-      if (e.touches.length === 1) {
-        this.mouseState.isDragging = true;
-        this.mouseState.prevX = e.touches[0].clientX;
-        this.mouseState.prevY = e.touches[0].clientY;
-      }
-    });
-
+    this.canvas.addEventListener('mousedown', this.handleMouseDown);
+    this.canvas.addEventListener('wheel', this.handleWheel, { passive: false });
+    this.canvas.addEventListener('touchstart', this.handleTouchStart);
     this.canvas.addEventListener('touchmove', this.handleTouchMove);
     this.canvas.addEventListener('touchend', this.handleTouchEnd);
   }
@@ -1496,16 +1517,6 @@ export class GameEngine {
     if (this.gameState === 'loading') return;
     this.frameCount++;
 
-    // v1.0 Game Systems
-    this.updateStats(delta);
-    this.updateWeather(delta);
-    this.updatePrayerSystem();
-    this.checkInteractions();
-    this.checkJobCompletion();
-    this.updateEconomy(delta);
-    this.updateNPCs(delta);
-    this.updatePolice(delta);
-
     // 1b. Move AI Traffic Vehicles dynamically along their seamless connected highways
     if (this.trafficVehicles && this.trafficVehicles.length > 0) {
       this.trafficVehicles.forEach((v) => {
@@ -1557,7 +1568,7 @@ export class GameEngine {
       if (this.armsCache.length === 0) {
         this.armsCache = this.playerGroup.children.filter(c => c.name === "leftArm" || c.name === "rightArm");
       }
-      const swing = Math.sin(this.clock.getElapsedTime() * 12) * 0.15;
+      const swing = Math.sin(this.timer.getElapsedTime() * 12) * 0.15;
       this.armsCache.forEach((arm, i) => { 
         if (arm && arm.rotation) {
           arm.rotation.x = i === 0 ? swing : -swing; 
@@ -1605,7 +1616,7 @@ export class GameEngine {
     if (this.dustParticles) {
       const positions = this.dustParticles.geometry.attributes.position.array as Float32Array;
       for (let i = 0; i < positions.length; i += 3) {
-        positions[i] += Math.sin(this.clock.getElapsedTime() * 0.5 + i) * 0.005;
+        positions[i] += Math.sin(this.timer.getElapsedTime() * 0.5 + i) * 0.005;
         positions[i+1] -= 0.15 * delta; // slow fall
         if (positions[i+1] < 0) {
           positions[i+1] = 15; // wrap height
@@ -1753,9 +1764,9 @@ export class GameEngine {
       this.playerState = PlayerState.Idle;
       
       // Idle Animation: Breathing & Micro-movement
-      const breathe = Math.sin(this.clock.getElapsedTime() * 1.5) * 0.015;
+      const breathe = Math.sin(this.timer.getElapsedTime() * 1.5) * 0.015;
       this.playerGroup.scale.y = 1.0 + breathe;
-      this.playerGroup.rotation.y += Math.sin(this.clock.getElapsedTime() * 0.3) * 0.002;
+      this.playerGroup.rotation.y += Math.sin(this.timer.getElapsedTime() * 0.3) * 0.002;
     }
 
     if (this.playerState !== this.lastState) {
@@ -1843,7 +1854,7 @@ export class GameEngine {
     if (!bones.leftArm || !bones.rightArm || !bones.leftLeg || !bones.rightLeg) return;
 
     // 1. Torso Squash & Stretch and Breathing
-    const breathing = Math.sin(this.clock.getElapsedTime() * 2.5) * 0.02;
+    const breathing = Math.sin(this.timer.getElapsedTime() * 2.5) * 0.02;
     const squatAmount = this.landingSquatTimer > 0 ? (this.landingSquatTimer / 0.25) * 0.2 : 0;
     
     if (bones.thobe) {
@@ -1883,8 +1894,8 @@ export class GameEngine {
     // Head tracking and idle breathing
     if (bones.head) {
         if (this.playerState === PlayerState.Idle) {
-            bones.head.rotation.y = THREE.MathUtils.lerp(bones.head.rotation.y, Math.sin(this.clock.getElapsedTime() * 0.8) * 0.35, lerpSpeed * 0.5);
-            bones.head.rotation.x = THREE.MathUtils.lerp(bones.head.rotation.x, Math.sin(this.clock.getElapsedTime() * 1.2) * 0.1, lerpSpeed * 0.5);
+            bones.head.rotation.y = THREE.MathUtils.lerp(bones.head.rotation.y, Math.sin(this.timer.getElapsedTime() * 0.8) * 0.35, lerpSpeed * 0.5);
+            bones.head.rotation.x = THREE.MathUtils.lerp(bones.head.rotation.x, Math.sin(this.timer.getElapsedTime() * 1.2) * 0.1, lerpSpeed * 0.5);
         } else {
             bones.head.rotation.y = THREE.MathUtils.lerp(bones.head.rotation.y, 0, lerpSpeed);
             bones.head.rotation.x = THREE.MathUtils.lerp(bones.head.rotation.x, 0, lerpSpeed);
@@ -1963,8 +1974,6 @@ export class GameEngine {
    /**
     * Optimized NPC Logic with Pathing and Simple Avoidance
     */
-  private updateNPCs_old(delta: number) {
-  }
 
   /**
    * Advanced Spring Arm Camera with Collision Avoidance
@@ -1973,7 +1982,7 @@ export class GameEngine {
     if (this.isCutsceneActive) return;
 
     if (this.gameState === 'menu') {
-      const time = this.clock.getElapsedTime();
+      const time = this.timer.getElapsedTime();
       this.cameraAngleH += 0.06 * delta;
       this.cameraAngleV = 0.25 + Math.sin(time * 0.1) * 0.05;
       this.camera.position.set(130 * Math.sin(this.cameraAngleH), 45, 130 * Math.cos(this.cameraAngleH));
@@ -2035,8 +2044,26 @@ export class GameEngine {
    */
 
   private startLoop() {
+    let lastTime = performance.now();
+    let frames = 0;
+    let fpsTimer = 0;
+
     const tick = () => {
-      const delta = Math.min(this.clock.getDelta(), 0.1); // Clamp to avoid physics explosion
+      const now = performance.now();
+      const delta = Math.min(this.timer.getDelta(), 0.1); // Clamp to avoid physics explosion
+      
+      // FPS Tracking logic
+      frames++;
+      fpsTimer += (now - lastTime);
+      lastTime = now;
+      
+      if (fpsTimer >= 1000) {
+        const fps = Math.round((frames * 1000) / fpsTimer);
+        if (this.callbacks.onFPS) this.callbacks.onFPS(fps);
+        frames = 0;
+        fpsTimer = 0;
+      }
+
       this.update(delta);
       this.renderer.render(this.scene, this.camera);
       this.animationFrameId = requestAnimationFrame(tick);
@@ -2471,7 +2498,7 @@ export class GameEngine {
                     npc.group.lookAt(targetPos);
 
                     // Animation swing
-                    const swing = Math.sin(this.clock.getElapsedTime() * 7) * 0.15;
+                    const swing = Math.sin(this.timer.getElapsedTime() * 7) * 0.15;
                     npc.group.children.forEach(c => {
                       if (c.name === "leftArm" || c.name === "rightArm") {
                         c.rotation.x = c.name === "leftArm" ? -swing : swing;
@@ -2908,7 +2935,7 @@ export class GameEngine {
         playerPos: { x: this.playerPos.x, y: this.playerPos.y, z: this.playerPos.z },
         stats: this.playerStats,
         inventory: this.inventory,
-        time: this.clock.getElapsedTime(),
+        time: this.timer.getElapsedTime(),
         money: this.playerStats.money
     };
     localStorage.setItem('taiz_v1_save', JSON.stringify(data));
@@ -2929,7 +2956,7 @@ export class GameEngine {
 
   private updateBirds(delta: number) {
     if (!(this as any).birds) return;
-    const time = this.clock.getElapsedTime();
+    const time = this.timer.getElapsedTime();
     (this as any).birds.forEach((bird: any) => {
       bird.angle += bird.speed * delta;
       bird.group.position.set(
@@ -2953,11 +2980,14 @@ export class GameEngine {
       cancelAnimationFrame(this.animationFrameId);
     }
     window.removeEventListener('resize', this.onResize);
-    if (this.handleKeyDown) window.removeEventListener('keydown', this.handleKeyDown);
-    if (this.handleKeyUp) window.removeEventListener('keyup', this.handleKeyUp);
-    
+    window.removeEventListener('keydown', this.handleKeyDown);
+    window.removeEventListener('keyup', this.handleKeyUp);
     window.removeEventListener('mousemove', this.handleMouseMove);
     window.removeEventListener('mouseup', this.handleMouseUp);
+    
+    this.canvas.removeEventListener('mousedown', this.handleMouseDown);
+    this.canvas.removeEventListener('wheel', this.handleWheel);
+    this.canvas.removeEventListener('touchstart', this.handleTouchStart);
     this.canvas.removeEventListener('touchmove', this.handleTouchMove);
     this.canvas.removeEventListener('touchend', this.handleTouchEnd);
 
@@ -2970,6 +3000,35 @@ export class GameEngine {
       this.audioCtx.close();
     }
 
+    // Deep disposal of scene resources to prevent memory leaks
+    this.scene.traverse((object) => {
+      if (object instanceof THREE.Mesh) {
+        if (object.geometry) {
+          object.geometry.dispose();
+        }
+
+        if (object.material) {
+          if (Array.isArray(object.material)) {
+            object.material.forEach((material) => this.disposeMaterial(material));
+          } else {
+            this.disposeMaterial(object.material);
+          }
+        }
+      }
+    });
+
     this.scene.clear();
+  }
+
+  private disposeMaterial(material: THREE.Material) {
+    material.dispose();
+    
+    // Dispose textures within the material
+    for (const key of Object.keys(material)) {
+      const value = (material as any)[key];
+      if (value instanceof THREE.Texture) {
+        value.dispose();
+      }
+    }
   }
 }

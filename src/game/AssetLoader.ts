@@ -17,10 +17,13 @@ export class AssetLoader {
   private assetExistenceCache: Map<string, boolean> = new Map();
   private loadedModelsCache: Map<string, THREE.Group> = new Map();
   private loadedTexturesCache: Map<string, THREE.Texture> = new Map();
+  private manifest: { models: string[], textures: string[], audio: string[] } | null = null;
+  private manifestPromise: Promise<void> | null = null;
 
   private constructor() {
     this.gltfLoader = new GLTFLoader();
     this.textureLoader = new THREE.TextureLoader();
+    this.manifestPromise = this.loadManifest();
   }
 
   public static getInstance(): AssetLoader {
@@ -30,20 +33,103 @@ export class AssetLoader {
     return AssetLoader.instance;
   }
 
+  private async loadManifest() {
+    try {
+      const response = await fetch('/assets_manifest.json');
+      if (response.ok) {
+        this.manifest = await response.json();
+        console.log('AssetLoader: Manifest discovered and loaded.', this.manifest);
+      }
+    } catch (err) {
+      console.warn('AssetLoader: Could not load manifest. Falling back to explicit checks.', err);
+    }
+  }
+
+  public getDiscoveredAssets(category: 'models' | 'textures' | 'audio'): string[] {
+    return this.manifest ? this.manifest[category] : [];
+  }
+
+  /**
+   * Intelligently finds the best matching asset in the manifest based on keywords.
+   * Useful for dynamic skinning and automatic model discovery.
+   */
+  public getBestMatch(category: 'models' | 'textures' | 'audio', keyword: string): string | null {
+    const assets = this.getDiscoveredAssets(category);
+    if (assets.length === 0) return null;
+
+    // Direct match check
+    const directMatch = assets.find(a => a.toLowerCase().includes(keyword.toLowerCase()));
+    if (directMatch) return directMatch;
+
+    // Fuzzy fallback: check if keyword is in path
+    const parts = keyword.toLowerCase().split(' ');
+    const scoredAssets = assets.map(asset => {
+      let score = 0;
+      const assetLower = asset.toLowerCase();
+      parts.forEach(p => {
+        if (assetLower.includes(p)) score++;
+      });
+      return { asset, score };
+    });
+
+    const topMatch = scoredAssets.sort((a, b) => b.score - a.score)[0];
+    return topMatch && topMatch.score > 0 ? topMatch.asset : null;
+  }
+
+  private isUrlInManifest(url: string): boolean {
+    if (!this.manifest) return false;
+    const cleanUrl = url.toLowerCase().replace(/^\/+|\/+$/g, '');
+    
+    // Check models, textures, audio
+    const allAssets = [
+      ...(this.manifest.models || []),
+      ...(this.manifest.textures || []),
+      ...(this.manifest.audio || [])
+    ];
+    
+    return allAssets.some(asset => asset.toLowerCase().replace(/^\/+|\/+$/g, '') === cleanUrl);
+  }
+
   /**
    * Lightweight HEAD check to verify if a file exists on the server before loading it.
-   * Helps avoid 404 console errors and enables seamless fallback to procedural templates.
+   * STRICT CHECK: Verifies Content-Type to avoid parsing index.html (SPA Fallback) as GLB.
    */
   public async checkAssetExists(url: string): Promise<boolean> {
+    if (this.manifestPromise) {
+      await this.manifestPromise;
+    }
+
     if (this.assetExistenceCache.has(url)) {
       return this.assetExistenceCache.get(url)!;
     }
 
+    // Smart manifest check: if manifest is loaded, we can instantly verify local asset existence
+    const isLocalAsset = url.startsWith('/assets/') || url.startsWith('assets/');
+    if (isLocalAsset && this.manifest) {
+      const isPresent = this.isUrlInManifest(url);
+      if (!isPresent) {
+        this.assetExistenceCache.set(url, false);
+        return false;
+      }
+    }
+
     try {
       const response = await fetch(url, { method: 'HEAD' });
-      const exists = response.ok;
-      this.assetExistenceCache.set(url, exists);
-      return exists;
+      if (!response.ok) {
+        this.assetExistenceCache.set(url, false);
+        return false;
+      }
+
+      // Critical fix for "Unexpected token <" (SPA Fallback HTML)
+      const contentType = response.headers.get('Content-Type');
+      if (contentType && contentType.includes('text/html')) {
+        console.warn(`AssetLoader: Blocking HTML fallback for binary asset request: ${url}`);
+        this.assetExistenceCache.set(url, false);
+        return false;
+      }
+
+      this.assetExistenceCache.set(url, true);
+      return true;
     } catch {
       this.assetExistenceCache.set(url, false);
       return false;
@@ -78,6 +164,14 @@ export class AssetLoader {
         url,
         async (gltf) => {
           const modelGroup = gltf.scene;
+
+          // 0. Empty Group Validation
+          if (!modelGroup || modelGroup.children.length === 0) {
+            console.warn(`AssetLoader: ${url} loaded but returned an empty group. Falling back.`);
+            resolve(null);
+            return;
+          }
+
           modelGroup.userData.animations = gltf.animations;
 
           // 1. Shadow settings and Frustum Culling Optimization
@@ -279,11 +373,30 @@ export class AssetLoader {
   ): Promise<boolean> {
     try {
       const loader = AssetLoader.getInstance();
-      const model = await loader.loadModel(modelPath, options);
+      
+      // Attempt to resolve path if it looks like a keyword instead of a path
+      let resolvedPath = modelPath;
+      if (!modelPath.includes('/') && !modelPath.includes('.')) {
+        const match = loader.getBestMatch('models', modelPath);
+        if (match) resolvedPath = match;
+      }
+
+      const model = await loader.loadModel(resolvedPath, options);
       if (model) {
         // Clear procedural children
         while (targetGroup.children.length > 0) {
-          targetGroup.remove(targetGroup.children[0]);
+          const child = targetGroup.children[0];
+          targetGroup.remove(child);
+          // Proper disposal of procedural geometry to prevent memory leaks
+          child.traverse((node: any) => {
+            if (node.isMesh) {
+              if (node.geometry) node.geometry.dispose();
+              if (node.material) {
+                if (Array.isArray(node.material)) node.material.forEach((m: any) => m.dispose());
+                else node.material.dispose();
+              }
+            }
+          });
         }
         // Add loaded model
         targetGroup.add(model);
@@ -304,26 +417,21 @@ export class AssetLoader {
    */
   public async runAssetValidationReport(onProgress?: (progress: number, assetLabel: string, error?: string) => void): Promise<string[]> {
     const failures: string[] = [];
-    const assetsToVerify = [
-      { category: 'Player/Characters', path: '/assets/models/characters/player.glb', label: 'Primary Player' },
-      { category: 'Player/Characters', path: '/assets/models/characters/yemeni_man.glb', label: 'Yemeni Traditional Man' },
-      { category: 'Player/Characters', path: '/assets/models/characters/modern_man.glb', label: 'Arab Modern Man' },
-      { category: 'Player/Characters', path: '/assets/models/characters/veiled_woman.glb', label: 'Veiled Yemeni Woman' },
-      { category: 'Player/Characters', path: '/assets/models/characters/npc.glb', label: 'Default NPC' },
-      { category: 'Vehicles', path: '/assets/models/vehicles/shas.glb', label: 'Toyota Shas 4x4' },
-      { category: 'Vehicles', path: '/assets/models/vehicles/hilux.glb', label: 'Toyota Hilux Pickup' },
-      { category: 'Vehicles', path: '/assets/models/vehicles/hiace.glb', label: 'Toyota HiAce Bus' },
-      { category: 'Vehicles', path: '/assets/models/vehicles/motorcycle.glb', label: 'Yemeni Moto' },
-      { category: 'Vehicles', path: '/assets/models/vehicles/aircraft.glb', label: 'Lumen Experimental Scout' },
-      { category: 'Architecture', path: '/assets/models/buildings/mosque.glb', label: 'Al-Ashrafiya Mosque' },
-      { category: 'Architecture', path: '/assets/models/buildings/cairo_castle.glb', label: 'Cairo Castle Citadel' },
-      { category: 'Architecture', path: '/assets/models/buildings/fuel_station.glb', label: 'Saba Fuel Station' },
-      { category: 'Architecture', path: '/assets/models/buildings/house.glb', label: 'Sanaa/Taiz Stone House' },
-      { category: 'Architecture', path: '/assets/models/buildings/minaret.glb', label: 'Traditional Minaret' },
-      { category: 'Environment Props', path: '/assets/models/props/market_stall.glb', label: 'Suleimani Tea Stall' },
-      { category: 'Environment Props', path: '/assets/models/props/street_light.glb', label: 'Municipal Street Light' },
-      { category: 'Vegetation', path: '/assets/models/vegetation/tree.glb', label: 'Acacia Tree' }
+    
+    // Discover assets from manifest or use default high-priority list
+    let assetsToVerify = [
+      { category: 'Characters', path: '/assets/models/characters/player.glb', label: 'Player' },
+      { category: 'Vehicles', path: '/assets/models/vehicles/shas.glb', label: 'Toyota Shas' }
     ];
+
+    if (this.manifest && this.manifest.models.length > 0) {
+      console.log('AssetLoader: Using discovered models from manifest for audit.');
+      assetsToVerify = this.manifest.models.map(path => ({
+        category: path.split('/')[2] || 'Uncategorized',
+        path: path,
+        label: path.split('/').pop()?.replace('.glb', '') || 'Unknown'
+      }));
+    }
 
     console.log("============= LUMEN CINEMATIC ENGINE: ASSET AUDIT REPORT =============");
     let completedCount = 0;
@@ -332,7 +440,7 @@ export class AssetLoader {
       
       const exists = await this.checkAssetExists(asset.path);
       if (!exists) {
-        const reason = "Not Found on Server";
+        const reason = "Not Found (or blocked HTML fallback)";
         failures.push(`${asset.path.split('/').pop()}: ${reason}`);
         if (onProgress) onProgress(currentProgress, asset.label, reason);
         console.warn(`[AUDIT] ❌ ${asset.category} -> ${asset.label} [${asset.path}] - ${reason}`);
@@ -345,6 +453,18 @@ export class AssetLoader {
         if (loadedModel) {
           if (onProgress) onProgress(currentProgress, asset.label);
           console.log(`[AUDIT] ✅ ${asset.category} -> ${asset.label} [${asset.path}] loaded successfully.`);
+          
+          // Dispose immediate test load to save memory
+          loadedModel.traverse((child) => {
+            if (child instanceof THREE.Mesh) {
+              child.geometry.dispose();
+              if (Array.isArray(child.material)) {
+                child.material.forEach(m => m.dispose());
+              } else {
+                child.material.dispose();
+              }
+            }
+          });
         } else {
           const reason = "Empty Group Returned";
           failures.push(`${asset.path.split('/').pop()}: ${reason}`);

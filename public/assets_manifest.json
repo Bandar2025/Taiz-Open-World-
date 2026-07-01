@@ -1,0 +1,8 @@
+{
+  "models": [
+    "/assets/models/buildings/cairo_castle.glb",
+    "/assets/models/buildings/house.glb"
+  ],
+  "textures": [],
+  "audio": []
+}

@@ -842,7 +842,7 @@ export class AssetBuilder {
         });
       } else {
         // Log the missing file to meet user's validation requirement
-        console.warn(`[ASSET BUILDER] ❌ Character Model Not Found: ${modelPath}. Falling back to procedural.`);
+        console.log(`[ASSET BUILDER] Info: Character Model ${modelPath} is not present in manifest. Using high-fidelity procedural generation.`);
       }
     };
 

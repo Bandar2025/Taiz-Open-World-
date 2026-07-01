@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { GameEngine } from '../game/GameEngine';
+import { Minimap } from './Minimap';
 import { Compass, Moon, Sun, Navigation, Volume2, VolumeX, Shield, Award, Shirt, MapPin, Sparkles, Car, Book } from 'lucide-react';
 import { GameUI } from './GameUI';
 import { Journal, CutsceneOverlay } from './StoryUI';
@@ -139,7 +140,8 @@ export const CitySandbox: React.FC<CitySandboxProps> = ({
         setDialogueSpeaker(speaker);
         setActiveDialogue(dialogue);
         setDialogueIndex(0);
-      }
+      },
+      onFPS: setFps
     }, {
       thobeColor: activeOutfit.thobe,
       turbanColor: activeOutfit.turban,
@@ -228,31 +230,6 @@ export const CitySandbox: React.FC<CitySandboxProps> = ({
     setShowSaveToast(true);
     setTimeout(() => setShowSaveToast(false), 3000);
   };
-
-  // Real-time FPS Tracker (purely functional and exact)
-  useEffect(() => {
-    let lastTime = performance.now();
-    let frames = 0;
-    let animId: number;
-    const interval = setInterval(() => {
-      const now = performance.now();
-      const currentFps = Math.round((frames * 1000) / (now - lastTime));
-      setFps(currentFps);
-      frames = 0;
-      lastTime = now;
-    }, 1000);
-
-    const countFrame = () => {
-      frames++;
-      animId = requestAnimationFrame(countFrame);
-    };
-    animId = requestAnimationFrame(countFrame);
-
-    return () => {
-      clearInterval(interval);
-      cancelAnimationFrame(animId);
-    };
-  }, []);
 
   // Fuel Consumption Simulation
   useEffect(() => {
@@ -641,7 +618,15 @@ export const CitySandbox: React.FC<CitySandboxProps> = ({
               </p>
             </div>
           ) : (
-            <canvas ref={canvasRef} className="block w-full h-full cursor-grab active:cursor-grabbing" />
+            <>
+              <canvas ref={canvasRef} className="block w-full h-full cursor-grab active:cursor-grabbing" />
+              <Minimap 
+                engine={engineRef.current} 
+                landmarks={landmarks} 
+                visible={!isPaused && !cutscene.active}
+                activeMission={activeMission}
+              />
+            </>
           )}
 
           {/* v1.0 Gameplay UI Layer */}
